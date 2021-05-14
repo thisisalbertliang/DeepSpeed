@@ -1073,6 +1073,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             tensor_to_allreduce = tensor.float()
 
         tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
+        print("[*] tensor to allreduce:", tensor_to_allreduce)
 
         if rank is None:
             #    "All Reducing"
@@ -1519,6 +1520,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
     def unscale_and_clip_grads(self, grad_groups_flat, norm_groups):
         total_norm = 0.0
+        print("[*] Norm:", norm_groups)
         for norm in norm_groups:
             total_norm += norm**2.0
         total_norm = math.sqrt(total_norm)

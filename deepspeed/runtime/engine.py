@@ -39,6 +39,8 @@ from deepspeed.utils import logger, log_dist, init_distributed
 from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
+from deepspeed.runtime.resplit_mp_weights import checkpoints_respliter
+
 from .pipe.module import PipelineModule
 from .utils import ensure_directory_exists
 from ..ops.op_builder import UtilsBuilder
@@ -1350,6 +1352,9 @@ class DeepSpeedEngine(Module):
         sd = self.module.state_dict(destination, prefix, keep_vars)
         return sd
 
+    # def load_module_state_dict_all(self, state_dict_all, strict=True):
+    #     self.module.load_state_dict_all(state_dict_all, strict=strict)
+
     def load_module_state_dict(self, state_dict, strict=True):
         self.module.load_state_dict(state_dict, strict=strict)
 
@@ -1387,7 +1392,8 @@ class DeepSpeedEngine(Module):
                         tag=None,
                         load_module_strict=True,
                         load_optimizer_states=True,
-                        load_lr_scheduler_states=True):
+                        load_lr_scheduler_states=True, 
+                        resplit_model_parallel=False):
         """Load training checkpoint
 
         Arguments:
@@ -1413,12 +1419,12 @@ class DeepSpeedEngine(Module):
                 logger.warning(f"Unable to find latest file at {latest_path}, if trying to load latest " \
                 "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint.")
                 return None, None
-
         load_path, client_states = self._load_checkpoint(load_dir,
-                                                         tag,
-                                                         load_module_strict=load_module_strict,
-                                                         load_optimizer_states=load_optimizer_states,
-                                                         load_lr_scheduler_states=load_lr_scheduler_states)
+                                                        tag,
+                                                        load_module_strict=load_module_strict,
+                                                        load_optimizer_states=load_optimizer_states,
+                                                        load_lr_scheduler_states=load_lr_scheduler_states,
+                                                        resplit_model_parallel=resplit_model_parallel)
 
         if self.zero_optimization() and load_path is not None:
             self._load_zero_checkpoint(load_dir,
@@ -1427,23 +1433,82 @@ class DeepSpeedEngine(Module):
 
         return load_path, client_states
 
+    # def _load_checkpoint_new_model_parallel(self,
+    #                                           load_dir, 
+    #                                           tag, 
+    #                                           load_module_strict=True,
+    #                                           load_optimizer_states=True,
+    #                                           load_lr_scheduler_states=True):
+    #     load_dir_path = os.path.join(load_dir, str(tag))
+
+    #     if not os.path.exists(load_dir_path):
+    #         logger.warn(
+    #             'Client provided checkpoint load directory path: {} does not exist ... skip checkpoint load'
+    #             .format(load_dir_path))
+    #         return None, None
+        
+    #     logger.info(f'rank: {self.global_rank} start loading all checkpointed model parallel weights in: {load_dir_path}')
+
+    #     checkpoint_all = []
+    #     for filename in sorted(os.listdir(load_dir_path)):
+    #         if filename.endswith('model_states.pt'):
+    #             filepath = os.path.join(load_dir, str(tag), filename)
+    #             logger.info(f'rank: {self.global_rank} loading checkpoint: {filepath}')
+    #             checkpoint = torch.load(filepath, map_location=lambda storage, loc: storage)
+    #             checkpoint_all.append(checkpoint)
+        
+    #     self.load_module_state_dict_all(state_dict_all=[checkpoint['module'] for checkpoint in checkpoint_all],
+    #                                     strict=load_module_strict)
+
+    #     # checkpoint_all_weights = None
+    #     # for filename in sorted(os.listdir(load_dir_path)):
+    #     #     if filename.endswith('.pt'):
+    #     #         filepath = os.path.join(load_dir, str(tag), filename)
+    #     #         if checkpoint_all_weights:
+    #     #             checkpoint = torch.load(filepath, map_location=lambda storage, loc: storage)
+    #     #             checkpoint_all_weights['module']['language_model.embedding.word_embeddings.weight'] = torch.cat(
+    #     #                 tensors=(checkpoint_all_weights['module']['language_model.embedding.word_embeddings.weight'], 
+    #     #                          checkpoint['module']['language_model.embedding.word_embeddings.weight']), 
+    #     #                 dim=0
+    #     #             )
+
+
+
+
     def _load_checkpoint(self,
                          load_dir,
                          tag,
                          load_module_strict=True,
                          load_optimizer_states=True,
-                         load_lr_scheduler_states=True):
+                         load_lr_scheduler_states=True, 
+                         resplit_model_parallel=False):
 
-        load_path = self._get_ckpt_name(load_dir, tag)
+        if resplit_model_parallel:
+            load_path = self._get_ckpt_name(load_dir, tag)
 
-        if not os.path.exists(load_path):
-            logger.warn(
-                'Client provided checkpoint load path: {} does not exist ... skip checkpoint load'
-                .format(load_path))
-            return None, None
+            dp_rank = self.mpu.get_data_parallel_rank()
+            mp_rank = self.mpu.get_model_parallel_rank()
+            mp_size = self.mpu.get_model_parallel_world_size()
+            if dp_rank == 0 and mp_rank == 0:
+                print('[*] Respliting model parallel weights...')
+                resplited_checkpoint_list = checkpoints_respliter(load_dir=load_dir, tag=tag, new_mp_size=mp_size)
+                print('[*] Successfully resplited model parallel weights')
+            else:
+                resplited_checkpoint_list = [None for _ in range(mp_size)]
+            torch.distributed.broadcast_object_list(resplited_checkpoint_list, src=0)
+            print('[*] Successfully broadcasted resplited model parallel weights to all processes')
+            checkpoint = resplited_checkpoint_list[mp_rank]
+        else:
+            load_path = self._get_ckpt_name(load_dir, tag)
 
-        logger.info(f'rank: {self.global_rank} loading checkpoint: {load_path}')
-        checkpoint = torch.load(load_path, map_location=lambda storage, loc: storage)
+            if not os.path.exists(load_path):
+                logger.warn(
+                    'Client provided checkpoint load path: {} does not exist ... skip checkpoint load'
+                    .format(load_path))
+                return None, None
+
+            logger.info(f'rank: {self.global_rank} loading checkpoint: {load_path}')
+            checkpoint = torch.load(load_path, map_location=lambda storage, loc: storage)
 
         if isinstance(self.module, PipelineModule):
             # Pipeline parallelism uses this to load its own checkpoint files.
