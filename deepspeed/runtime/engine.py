@@ -1352,9 +1352,6 @@ class DeepSpeedEngine(Module):
         sd = self.module.state_dict(destination, prefix, keep_vars)
         return sd
 
-    # def load_module_state_dict_all(self, state_dict_all, strict=True):
-    #     self.module.load_state_dict_all(state_dict_all, strict=strict)
-
     def load_module_state_dict(self, state_dict, strict=True):
         self.module.load_state_dict(state_dict, strict=strict)
 
@@ -1393,7 +1390,8 @@ class DeepSpeedEngine(Module):
                         load_module_strict=True,
                         load_optimizer_states=True,
                         load_lr_scheduler_states=True, 
-                        resplit_model_parallel=False):
+                        resplit_model_parallel=False, 
+                        args=None):
         """Load training checkpoint
 
         Arguments:
@@ -1424,7 +1422,8 @@ class DeepSpeedEngine(Module):
                                                         load_module_strict=load_module_strict,
                                                         load_optimizer_states=load_optimizer_states,
                                                         load_lr_scheduler_states=load_lr_scheduler_states,
-                                                        resplit_model_parallel=resplit_model_parallel)
+                                                        resplit_model_parallel=resplit_model_parallel, 
+                                                        args=args)
 
         if self.zero_optimization() and load_path is not None:
             self._load_zero_checkpoint(load_dir,
@@ -1481,7 +1480,8 @@ class DeepSpeedEngine(Module):
                          load_module_strict=True,
                          load_optimizer_states=True,
                          load_lr_scheduler_states=True, 
-                         resplit_model_parallel=False):
+                         resplit_model_parallel=False, 
+                         args=None):
 
         if resplit_model_parallel:
             load_path = self._get_ckpt_name(load_dir, tag)
@@ -1491,7 +1491,7 @@ class DeepSpeedEngine(Module):
             mp_size = self.mpu.get_model_parallel_world_size()
             if dp_rank == 0 and mp_rank == 0:
                 print('[*] Respliting model parallel weights...')
-                resplited_checkpoint_list = checkpoints_respliter(load_dir=load_dir, tag=tag, new_mp_size=mp_size)
+                resplited_checkpoint_list = checkpoints_respliter(load_dir=load_dir, tag=tag, new_mp_size=mp_size, args=args)
                 print('[*] Successfully resplited model parallel weights')
             else:
                 resplited_checkpoint_list = [None for _ in range(mp_size)]

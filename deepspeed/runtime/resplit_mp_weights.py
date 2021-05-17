@@ -1,3 +1,4 @@
+
 import torch
 import os
 
@@ -9,6 +10,20 @@ QKV_WEIGHT_KEY = 'language_model.transformer.layers.{}.attention.query_key_value
 QKV_BIAS_KEY = 'language_model.transformer.layers.{}.attention.query_key_value.bias'
 POST_ATTENTION_LAYER_NORM_WEIGHT_KEY = 'language_model.transformer.layers.{}.post_attention_layernorm.weight'
 POST_ATTENTION_LAYER_NORM_BIAS_KEY = 'language_model.transformer.layers.{}.post_attention_layernorm.bias'
+ATTENTION_DENSE_WEIGHT_KEY = 'language_model.transformer.layers.{}.attention.dense.weight'
+ATTENTION_DENSE_BIAS_KEY = 'language_model.transformer.layers.{}.attention.dense.bias'
+MLP_H_2_4H_WEIGHT_KEY = 'language_model.transformer.layers.{}.mlp.dense_h_to_4h.weight'
+MLP_H_2_4H_BIAS_KEY = 'language_model.transformer.layers.{}.mlp.dense_h_to_4h.bias'
+MLP_4H_2_H_WEIGHT_KEY = 'language_model.transformer.layers.{}.mlp.dense_4h_to_h.weight'
+MLP_4H_2_H_BIAS_KEY = 'language_model.transformer.layers.{}.mlp.dense_4h_to_h.bias'
+FINAL_LAYER_NORM_WEIGHT_KEY = 'language_model.transformer.final_layernorm.weight'
+FINAL_LAYER_NORM_BIAS_KEY = 'language_model.transformer.final_layernorm.bias'
+
+
+def init_method_normal(tensor, std):
+    """Init method based on N(0, sigma)."""
+    return torch.nn.init.normal_(tensor, mean=0.0, std=std)
+
 
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
@@ -23,11 +38,18 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
-def resplit_word_embeddings_weights(word_embeddings_weight_list, new_mp_size):
+def resplit_word_embeddings_weights(word_embeddings_weight_list, new_mp_size, args):
     word_embeddings_weight_all = torch.cat(word_embeddings_weight_list, dim=0)
 
-    global_vocab_size, _ = word_embeddings_weight_all.size()
-    per_partition_vocab_size = divide(global_vocab_size, new_mp_size)
+    per_partition_vocab_size = divide(args.padded_vocab_size, new_mp_size)
+
+    old_padded_vocab_size, embedding_dim = word_embeddings_weight_all.size()
+    # pad dummy rows at the end if the word embedding matrix under the new mp size has more rows now. 
+    if args.padded_vocab_size > old_padded_vocab_size:
+        pad_size = args.padded_vocab_size - old_padded_vocab_size
+        pad_tensor = torch.empty(pad_size, embedding_dim, device=torch.cuda.current_device(), dtype=args.params_dtype)
+        init_method_normal(pad_tensor, args.init_method_std)
+        word_embeddings_weight_all = torch.cat((word_embeddings_weight_all, pad_tensor), dim=0)
 
     new_word_embeddings_weight_list = []
     for mp_rank in range(new_mp_size):
@@ -39,72 +61,52 @@ def resplit_word_embeddings_weights(word_embeddings_weight_list, new_mp_size):
     return new_word_embeddings_weight_list
 
 
-def resplit_self_attention_QKV_weights(qkv_weight_list, new_mp_size):
-    qkv_weight_all = torch.cat(qkv_weight_list, dim=0)
+def resplit_column_parallel_linear_weights(cp_weight_list, new_mp_size):
+    cp_weight_all = torch.cat(cp_weight_list, dim=0)
 
-    global_output_size, _ = qkv_weight_all.size()
+    global_output_size, _ = cp_weight_all.size()
     output_size_per_partition = divide(global_output_size, new_mp_size)
 
-    new_qkv_weight_list = []
+    new_cp_weight_list = []
     for mp_rank in range(new_mp_size):
         start_index = mp_rank * output_size_per_partition
         end_index = start_index + output_size_per_partition
-        new_qkv_weight_list.append(
-            qkv_weight_all[start_index : end_index, :]
+        new_cp_weight_list.append(
+            cp_weight_all[start_index : end_index, :]
         )
-    return new_qkv_weight_list
+    return new_cp_weight_list
 
 
-def resplit_self_attention_QKV_biases(qkv_bias_list, new_mp_size):
-    qkv_bias_all = torch.cat(qkv_bias_list)
+def resplit_column_parallel_linear_biases(cp_bias_list, new_mp_size):
+    cp_bias_all = torch.cat(cp_bias_list)
     
-    print(f'qkv_bias_all.size() = {qkv_bias_all.size()}')
-    global_bias_size = qkv_bias_all.size()[0]
+    global_bias_size = cp_bias_all.size()[0]
     bias_size_per_partition = divide(global_bias_size, new_mp_size)
 
-    new_qkv_bias_list = []
+    new_cp_bias_list = []
     for mp_rank in range(new_mp_size):
         start_index = mp_rank * bias_size_per_partition
         end_index = start_index + bias_size_per_partition
-        new_qkv_bias_list.append(
-            qkv_bias_all[start_index : end_index]
+        new_cp_bias_list.append(
+            cp_bias_all[start_index : end_index]
         )
-    return new_qkv_bias_list
+    return new_cp_bias_list
 
 
-def resplit_self_attention_dense_weights(dense_weight_list, new_mp_size):
-    # TO DO
-    pass
+def resplit_row_parallel_linear_weights(rp_weight_list, new_mp_size):
+    rp_weight_all = torch.cat(rp_weight_list, dim=1)
 
+    _, global_input_size = rp_weight_all.size()
+    input_size_per_partition = divide(global_input_size, new_mp_size)
 
-def resplit_self_attention_dense_biases(dense_bias_list, new_mp_size):
-    # TO DO
-    pass
-
-
-def resplit_dense_h_to_4h_weights(dense_weight_list, new_mp_size):
-    # TO DO
-    pass
-
-
-def resplit_dense_h_to_4h_biases(dense_bias_list, new_mp_size):
-    # TO DO
-    pass
-
-
-def resplit_dense_4h_to_h_weights(dense_weight_list, new_mp_size):
-    # TO DO
-    pass
-
-
-def resplit_dense_4h_to_h_biases(dense_bias_list, new_mp_size):
-    # TO DO
-    pass
-
-
-'''
-More resplitting functions here later...
-'''
+    new_rp_weight_list = []
+    for mp_rank in range(new_mp_size):
+        start_index = mp_rank * input_size_per_partition
+        end_index = start_index + input_size_per_partition
+        new_rp_weight_list.append(
+            rp_weight_all[:, start_index : end_index]
+        )
+    return new_rp_weight_list
 
 
 def parse_num_trans_layers(state_dict):
@@ -114,18 +116,22 @@ def parse_num_trans_layers(state_dict):
     '''
     trans_layer_keys = [key for key in state_dict.keys() if 'language_model.transformer.layers' in key]
     layer_numbers = [int(key.split('.')[3]) for key in trans_layer_keys]
-    num_trans_layers = sorted(layer_numbers)[-1]
+    num_trans_layers = sorted(layer_numbers)[-1] + 1
     return num_trans_layers
 
 
-def resplit_state_dicts(state_dict_list, new_mp_size):
+def resplit_state_dicts(state_dict_list, new_mp_size, args):
     new_state_dict_list = [{} for _ in range(new_mp_size)]
     arbitrary_state_dict = state_dict_list[0]
-    print(f'arbitrary_state_dict = {arbitrary_state_dict}')
+    # print(f'arbitrary_state_dict = {arbitrary_state_dict}')
 
     # resplit the word embeddings weights
     word_embeddings_weight_list = [state_dict[WORD_EMBEDDINGS_KEY] for state_dict in state_dict_list]
-    new_word_embeddings_weight_list = resplit_word_embeddings_weights(word_embeddings_weight_list=word_embeddings_weight_list, new_mp_size=new_mp_size)
+    new_word_embeddings_weight_list = resplit_word_embeddings_weights(
+        word_embeddings_weight_list=word_embeddings_weight_list, 
+        new_mp_size=new_mp_size, 
+        args=args
+    )
     for state_dict, new_word_embeddings_weight in zip(new_state_dict_list, new_word_embeddings_weight_list):
         state_dict[WORD_EMBEDDINGS_KEY] = new_word_embeddings_weight
     
@@ -138,10 +144,11 @@ def resplit_state_dicts(state_dict_list, new_mp_size):
 
     # loop over all transformer layers
     num_trans_layers = parse_num_trans_layers(state_dict_list[0])
+    assert num_trans_layers == args.num_layers, f'[*] number of layers does not equal to number of layers in checkpoint: {num_trans_layers} != {args.num_layers}'
     for layer_num in range(num_trans_layers):
-        # Since there is no model parallelism for transformer layer's layer normalization, 
-        # we do not need to resplit the layer normalization weights and biases. 
-        # We simply reload the layer normalization weights and biases
+        # Since there is no model parallelism for ParallelTransformerLayer.input_layernorm, 
+        # we do not need to resplit ParallelTransformerLayer.input_layernorm's weights and biases. 
+        # We simply reload ParallelTransformerLayer.input_layernorm's weights and biases
         layer_norm_weight_key = LAYER_NORM_WEIGHT_KEY.format(layer_num)
         layer_norm_bias_key = LAYER_NORM_BIAS_KEY.format(layer_num)
         layer_norm_weight = arbitrary_state_dict[layer_norm_weight_key]
@@ -153,26 +160,44 @@ def resplit_state_dicts(state_dict_list, new_mp_size):
         # resplit the self-attention QKV weights
         qkv_weight_key = QKV_WEIGHT_KEY.format(layer_num)
         old_qkv_weight_list = [old_state_dict[qkv_weight_key] for old_state_dict in state_dict_list]
-        new_qkv_weight_list = resplit_self_attention_QKV_weights(qkv_weight_list=old_qkv_weight_list, new_mp_size=new_mp_size)
+        new_qkv_weight_list = resplit_column_parallel_linear_weights(
+            cp_weight_list=old_qkv_weight_list, 
+            new_mp_size=new_mp_size
+        )
         for state_dict, new_qkv_weight in zip(new_state_dict_list, new_qkv_weight_list):
             state_dict[qkv_weight_key] = new_qkv_weight
 
         # resplit the self-attention QKV biases
         qkv_bias_key = QKV_BIAS_KEY.format(layer_num)
         old_qkv_bias_list = [old_state_dict[qkv_bias_key] for old_state_dict in state_dict_list]
-        new_qkv_bias_list = resplit_self_attention_QKV_biases(qkv_bias_list=old_qkv_bias_list, new_mp_size=new_mp_size)
+        new_qkv_bias_list = resplit_column_parallel_linear_biases(
+            cp_bias_list=old_qkv_bias_list, 
+            new_mp_size=new_mp_size
+        )
         for state_dict, new_qkv_bias in zip(new_state_dict_list, new_qkv_bias_list):
             state_dict[qkv_bias_key] = new_qkv_bias
         
         # resplit the self-attention dense weights
-        # to do ...
+        attention_dense_weight_key = ATTENTION_DENSE_WEIGHT_KEY.format(layer_num)
+        old_attention_dense_weight_list = [old_state_dict[attention_dense_weight_key] for old_state_dict in state_dict_list]
+        new_attention_dense_weight_list = resplit_row_parallel_linear_weights(
+            rp_weight_list=old_attention_dense_weight_list, 
+            new_mp_size=new_mp_size
+        )
+        for state_dict, new_attention_dense_weight in zip(new_state_dict_list, new_attention_dense_weight_list):
+            state_dict[attention_dense_weight_key] = new_attention_dense_weight
 
-        # resplit the self-attention dense biases
-        # to do ...
+        # Since there is no model parallelism for ParallelSelfAttention dense biases, 
+        # we do not need to resplit the ParallelSelfAttention.dense biases.
+        # We simply reload the ParallelSelfAttention.dense biases.
+        attention_dense_bias_key = ATTENTION_DENSE_BIAS_KEY.format(layer_num)
+        attention_dense_bias = arbitrary_state_dict[attention_dense_bias_key]
+        for state_dict in new_state_dict_list:
+            state_dict[attention_dense_bias_key] = attention_dense_bias.clone()
 
-        # Since there is no model parallelism for transformer layer's post attention layer normalization, 
-        # we do not need to resplit the post attention layer normalization weights and biases. 
-        # We simply reload the post attention layer normalization weights and biases
+        # Since there is no model parallelism for ParallelTransformerLayer.post_attention_layernorm, 
+        # we do not need to resplit ParallelTransformerLayer.post_attention_layernorm's weights and biases. 
+        # We simply reload ParallelTransformerLayer.post_attention_layernorm's weights and biases
         post_attention_layer_norm_weight_key = POST_ATTENTION_LAYER_NORM_WEIGHT_KEY.format(layer_num)
         post_attention_layer_norm_bias_key = POST_ATTENTION_LAYER_NORM_BIAS_KEY.format(layer_num)
         post_attention_layer_norm_weight = arbitrary_state_dict[post_attention_layer_norm_weight_key]
@@ -182,33 +207,57 @@ def resplit_state_dicts(state_dict_list, new_mp_size):
             state_dict[post_attention_layer_norm_bias_key] = post_attention_layer_norm_bias.clone()
         
         # resplit the mlp dense_h_to_4h weights
-        # to do ...
+        mlp_h_2_4h_weight_key = MLP_H_2_4H_WEIGHT_KEY.format(layer_num)
+        old_mlp_h_2_4h_weight_list = [old_state_dict[mlp_h_2_4h_weight_key] for old_state_dict in state_dict_list]
+        new_mlp_h_2_4h_weight_list = resplit_column_parallel_linear_weights(
+            cp_weight_list=old_mlp_h_2_4h_weight_list, 
+            new_mp_size=new_mp_size
+        )
+        for state_dict, new_mlp_h_2_4h_weight in zip(new_state_dict_list, new_mlp_h_2_4h_weight_list):
+            state_dict[mlp_h_2_4h_weight_key] = new_mlp_h_2_4h_weight
 
         # resplit the mlp dense_h_to_4h biases
-        # to do ...
+        mlp_h_2_4h_bias_key = MLP_H_2_4H_BIAS_KEY.format(layer_num)
+        old_mlp_h_2_4h_bias_list = [old_state_dict[mlp_h_2_4h_bias_key] for old_state_dict in state_dict_list]
+        new_mlp_h_2_4h_bias_list = resplit_column_parallel_linear_biases(
+            cp_bias_list=old_mlp_h_2_4h_bias_list, 
+            new_mp_size=new_mp_size
+        )
+        for state_dict, new_mlp_h_2_4h_bias in zip(new_state_dict_list, new_mlp_h_2_4h_bias_list):
+            state_dict[mlp_h_2_4h_bias_key] = new_mlp_h_2_4h_bias
 
         # resplit the mlp dense_4h_to_h weights
-        # to do ...
+        mlp_4h_2_h_weight_key = MLP_4H_2_H_WEIGHT_KEY.format(layer_num)
+        old_mlp_4h_2_h_weight_list = [old_state_dict[mlp_4h_2_h_weight_key] for old_state_dict in state_dict_list]
+        new_mlp_4h_2_h_weight_list = resplit_row_parallel_linear_weights(
+            rp_weight_list=old_mlp_4h_2_h_weight_list, 
+            new_mp_size=new_mp_size
+        )
+        for state_dict, new_mlp_4h_2_h_weight in zip(new_state_dict_list, new_mlp_4h_2_h_weight_list):
+            state_dict[mlp_4h_2_h_weight_key] = new_mlp_4h_2_h_weight
 
-        # resplit the mlp dense_4h_to_h biases
-        # to do ...
-
-    # print(f'new_state_dict_list = {new_state_dict_list}')
-
-    # temporary garbage code to avoid errors in testing
-    for key, val in state_dict_list[0].items():
+        # Since there is no model parallelism for ParallelMLP.dense_4h_to_h, 
+        # we do not neet to resplit the ParallelMLP.dense_4h_to_h biases.
+        # We simply reload the ParallelMLP.dense_4h_to_h biases
+        mlp_4h_2_h_bias_key = MLP_4H_2_H_BIAS_KEY.format(layer_num)
+        mlp_4h_2_h_bias = arbitrary_state_dict[mlp_4h_2_h_bias_key]
         for state_dict in new_state_dict_list:
-            if key not in state_dict:
-                state_dict[key] = val
+            state_dict[mlp_4h_2_h_bias_key] = mlp_4h_2_h_bias.clone()
+    
+    final_layer_norm_weight = arbitrary_state_dict[FINAL_LAYER_NORM_WEIGHT_KEY]
+    final_layer_norm_bias = arbitrary_state_dict[FINAL_LAYER_NORM_BIAS_KEY]
+    for state_dict in new_state_dict_list:
+        state_dict[FINAL_LAYER_NORM_WEIGHT_KEY] = final_layer_norm_weight.clone()
+        state_dict[FINAL_LAYER_NORM_BIAS_KEY] = final_layer_norm_bias.clone()
 
     return new_state_dict_list
 
 
-def resplit_checkpoints(checkpoint_list, new_mp_size):
-    assert checkpoint_list, 'checkpoint_list cannot be empty'
+def resplit_checkpoints(checkpoint_list, new_mp_size, args):
+    assert checkpoint_list, '[*] checkpoint_list cannot be empty'
 
     state_dict_list = [checkpoint['module'] for checkpoint in checkpoint_list]
-    new_state_dict_list = resplit_state_dicts(state_dict_list=state_dict_list, new_mp_size=new_mp_size)
+    new_state_dict_list = resplit_state_dicts(state_dict_list=state_dict_list, new_mp_size=new_mp_size, args=args)
 
     new_checkpoint_list = [checkpoint_list[mp_rank] for mp_rank in range(new_mp_size)]
     for checkpoint, state_dict in zip(new_checkpoint_list, new_state_dict_list):
@@ -217,7 +266,7 @@ def resplit_checkpoints(checkpoint_list, new_mp_size):
     return new_checkpoint_list
 
 
-def checkpoints_respliter(load_dir, tag, new_mp_size):
+def checkpoints_respliter(load_dir, tag, new_mp_size, args):
     checkpoint_list = []
     ckpt_dir = os.path.join(load_dir, str(tag))
     for checkpoint_filename in sorted(os.listdir(ckpt_dir)):
@@ -225,51 +274,6 @@ def checkpoints_respliter(load_dir, tag, new_mp_size):
             checkpoint_list.append(
                 torch.load(os.path.join(load_dir, str(tag), checkpoint_filename), map_location=lambda storage, loc: storage.cuda(torch.cuda.current_device()))
             )
-    # for old_mp_rank in range(old_mp_size):
-    #     checkpoint_filename = os.path.join(load_dir, str(tag), f'mp_rank_0{old_mp_rank}_model_states.pt')
-    #     checkpoint_list.append(
-    #         torch.load(checkpoint_filename, map_location=lambda storage, loc: storage.cuda(torch.cuda.current_device()))
-    #     )
-    print(f'ALBERT_DEBUG: RANK {torch.distributed.get_rank()}: checkpoint_list[0]["module] = {checkpoint_list[0]["module"]}')
-    print(f'ALBERT_DEBUG: RANK {torch.distributed.get_rank()}: checkpoint_list[1]["module] = {checkpoint_list[1]["module"]}')
     
-    new_checkpoint_list = resplit_checkpoints(checkpoint_list, new_mp_size)
+    new_checkpoint_list = resplit_checkpoints(checkpoint_list, new_mp_size, args)
     return new_checkpoint_list
-
-    # for mp_rank, checkpoint in enumerate(new_checkpoint_list):
-    #     checkpoint_filename = os.path.join(load_dir, str(tag), f'mp_rank_0{mp_rank}_model_states.pt')
-    #     os.remove(checkpoint_filename)
-    #     torch.save(checkpoint, checkpoint_filename)
-
-
-
-# if __name__ == '__main__':
-#     # checkpoint_0 = torch.load('./100/mp_rank_00_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_1 = torch.load('./100/mp_rank_01_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_2 = torch.load('./100/mp_rank_02_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_3 = torch.load('./100/mp_rank_03_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_4 = torch.load('./100/mp_rank_04_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_5 = torch.load('./100/mp_rank_05_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_6 = torch.load('./100/mp_rank_06_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-#     # checkpoint_7 = torch.load('./100/mp_rank_07_model_states.pt', map_location=lambda storage, loc: storage.cuda(0))
-
-#     checkpoint_list = [torch.load(f'./100/mp_rank_0{mp_rank}_model_states.pt', map_location=lambda storage, loc: storage.cuda(0)) for mp_rank in range(8)]
-#     # state_dict_list = [checkpoint['module'] for checkpoint in checkpoint_list]
-#     new_checkpoint_list = resplit_checkpoints(checkpoint_list=checkpoint_list, new_mp_size=4)
-#     # for mp_rank, checkpoint in enumerate(new_checkpoint_list):
-#     #     # torch.save(checkpoint, f'mp_rank_0{mp_rank}_model_states.pt')
-#     #     os.remove(f'mp_rank_0{mp_rank}_model_states.pt')
-#     # for checkpoint in new_checkpoint_list:
-#     #     state_dict = checkpoint['module']
-#     #     for key, val in state_dict.items():
-#     #         print(f'key = {key} ; type(val) = {type(val)} ; val.size() = {val.size()}')
-
-
-#     # for key, val in checkpoint_0.items():
-#     #     print(f'key = {key} ; type(val) = {type(val)}')
-
-#     # state_dict_0 = checkpoint_0['module']
-#     # for key, val in state_dict_0.items():
-#     #     print(f'key = {key} ; type(val) = {type(val)} ; val.size() = {val.size()}')
-#     # for state_dict1, state_dict2 in zip(state_dict_list, state_dict_list[1:]):
-#     #     assert torch.equal(state_dict1[POSITION_EMBEDDINGS_KEY], state_dict2[POSITION_EMBEDDINGS_KEY])

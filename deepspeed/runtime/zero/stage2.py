@@ -1073,7 +1073,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
             tensor_to_allreduce = tensor.float()
 
         tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
-        print("[*] tensor to allreduce:", tensor_to_allreduce)
 
         if rank is None:
             #    "All Reducing"
