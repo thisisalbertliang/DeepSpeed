@@ -1100,6 +1100,11 @@ class DeepSpeedEngine(Module):
         if self.wall_clock_breakdown():
             self.timers('step_microstep').start()
             self.timers('step').start()
+        
+        # if self.mpu.get_data_parallel_rank() == 0 and self.mpu.get_model_parallel_rank() == 0:
+        #     for group in self.optimizer.param_groups:
+        #         for param in group['params']:
+        #             print(f'ALBERT_DEBUG: DP RANK {self.mpu.get_data_parallel_rank()}: MP RANK {self.mpu.get_model_parallel_rank()}: param.shape {param.shape}')
 
         assert self.optimizer is not None, "must provide optimizer during " \
                                            "init in order to use step"
@@ -1216,6 +1221,7 @@ class DeepSpeedEngine(Module):
                  ranks=[0])
 
     def allreduce_bucket(self, bucket):
+        # print('[*] allreduce tensor:', tensor)
         tensor = self.flatten(bucket)
 
         tensor_to_allreduce = tensor

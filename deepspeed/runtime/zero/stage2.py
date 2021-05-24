@@ -1519,7 +1519,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
     def unscale_and_clip_grads(self, grad_groups_flat, norm_groups):
         total_norm = 0.0
-        print("[*] Norm:", norm_groups)
         for norm in norm_groups:
             total_norm += norm**2.0
         total_norm = math.sqrt(total_norm)
